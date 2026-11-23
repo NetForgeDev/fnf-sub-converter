@@ -16,13 +16,13 @@ const DEFAULT_CS_LIST = [
 const DEFAULT_FM_LIST = [
   {
     id: 'default-fm-v2',
-    name: 'Fragment v2 (Default)',
+    name: 'Fragment v2',
     value:
       '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}}]}',
   },
   {
     id: 'default-fm-v1',
-    name: 'Fragment v1 (Classic)',
+    name: 'Fragment v1',
     value:
       '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["5", "94", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["109", "1"], "delays": ["1"], "maxSplit": "355"}}]}',
   },
@@ -1442,8 +1442,8 @@ function renderDashboardPage(state, origin) {
       <h2>
         <span id="fmFormTitle">Add / Edit Final Mask (fm)</span>
         <span style="display:flex;gap:8px">
-          <button type="button" id="loadFmV2Btn" class="btn btn-secondary btn-sm">Load v2 (Default)</button>
-          <button type="button" id="loadFmV1Btn" class="btn btn-secondary btn-sm">Load v1 (Classic)</button>
+          <button type="button" id="loadFmV2Btn" class="btn btn-secondary btn-sm">Load v2</button>
+          <button type="button" id="loadFmV1Btn" class="btn btn-secondary btn-sm">Load v1</button>
         </span>
       </h2>
       <form id="fmForm">
