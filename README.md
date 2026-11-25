@@ -2,7 +2,7 @@
 
 A lightweight, single-file **Cloudflare Worker** with a built-in web admin panel that applies **Patterniha's F&F (Fragment, Cipher Suites & Fingerprint) method** (`cs`, `fm`, `fp`) to your existing subscriptions or personal configs to help bypass DPI and firewall filtering.
 
-> **Supported Protocols:** `VLESS`, `Trojan`, and `VMess` (strictly filtered to **TLS + WebSocket** configs).
+> **Supported Protocols:** `VLESS`, `Trojan`, and `VMess` (strictly filtered to **TLS** configs with `WS`, `HTTPUpgrade`, `XHTTP`, `gRPC`, or `TCP` transports).
 
 ---
 
@@ -10,7 +10,7 @@ A lightweight, single-file **Cloudflare Worker** with a built-in web admin panel
 
 - **Applies Patterniha's F&F Method:** Automatically injects `cs` (TLS Cipher Suites), `fm` (Final Mask / Fragment JSON), and `fp` (TLS Fingerprint) into clean Xray share links.
 - **Universal Input Auto-Detection:** Accepts **Sing-box JSON**, **Xray JSON**, and **V2Ray/Xray URI subscriptions** (both raw text and Base64 / URL-safe Base64), or even raw pasted configs.
-- **Strict TLS + WS Filtering:** Keeps only configs with `security=tls` and `type=ws` (WebSocket), automatically filtering out incompatible non-TLS, Reality, TCP, or gRPC nodes.
+- **Strict TLS & Transport Filtering:** Keeps only `security=tls` configs matching your selected transports (`WS`, `HTTPUpgrade`, `XHTTP`, `gRPC`, and `TCP` — all enabled by default), filtering out incompatible non-TLS, Reality, and UDP-based nodes.
 - **Clean IP Pool (IPv4 & IPv6):** Save custom lists containing mixed IPv4 and IPv6 addresses and choose per subscription:
   - **IPv4 only** (assigns a random IPv4 per server)
   - **IPv6 only** (assigns a random IPv6 per server)
@@ -52,7 +52,7 @@ You don't need any build tools or CLI—just copy and paste:
 ## 🛠️ Usage
 
 1. Open the **Clean IPs**, **Cipher Suites (cs)**, and **Final Mask (fm)** tabs if you want to add your custom presets (default `cs` and Fragment `v1`/`v2` presets are already preloaded).
-2. In the **Subscriptions** tab, paste your input subscription URL(s) (or raw configs), choose your desired `fp`, `cs`, `fm`, Clean IP mode, and IP version checkboxes, then save.
+2. In the **Subscriptions** tab, paste your input subscription URL(s) (or raw configs), choose your desired `fp`, `cs`, `fm`, Clean IP mode, allowed transports, and IP version checkboxes, then save.
 3. Copy the generated `/sub/...` link and import it into a compatible client.
    - Tip: Append `?raw=1` for plain text output or `?b64=1` for Base64 output.
 
@@ -74,6 +74,6 @@ To use the generated subscriptions with full `cs` and `fm` support, use one of t
 ## ⚠️ Disclaimer
 
 - This tool is intended for educational and personal network research purposes.
-- Non-TLS and non-WebSocket configs are intentionally excluded from the output because `cs` and `fm` parameters require TLS + WS.
+- Non-TLS, Reality, and UDP-based configs are intentionally excluded from the output because F&F (`cs` and `fm`) parameters require TLS over TCP-based transports.
 
 <sub>Developed with AI assistance.</sub>
