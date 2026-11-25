@@ -5,7 +5,7 @@
  * Optional Env Vars (initial fallback): ADMIN_PATH (default: "panel"), ADMIN_PASS (default: "admin123")
  */
 
-const APP_VERSION = '1.0.1';
+const APP_VERSION = '1.0.2';
 const GITHUB_URL = 'https://github.com/NetForgeDev/fnf-sub-converter';
 
 const DEFAULT_CS_LIST = [
@@ -33,6 +33,14 @@ const DEFAULT_FM_LIST = [
 ];
 
 const FP_OPTIONS = ['unsafe', 'chrome', 'firefox', 'safari', 'random', 'none'];
+const TRANSPORT_OPTIONS = [
+  { id: 'ws', label: 'WS' },
+  { id: 'httpupgrade', label: 'HTTPUpgrade' },
+  { id: 'xhttp', label: 'XHTTP' },
+  { id: 'grpc', label: 'gRPC' },
+  { id: 'tcp', label: 'TCP' },
+];
+const ALL_TRANSPORT_IDS = TRANSPORT_OPTIONS.map((t) => t.id);
 const VALID_IP_GEN_MODES = ['v4', 'v6', 'both', 'mixed'];
 const KV_KEY = 'CONFIG_STATE_V1';
 
@@ -125,15 +133,10 @@ async function loadState(env) {
     if (!Array.isArray(state.ipPresets)) { state.ipPresets = []; dirty = true; }
     if (!Array.isArray(state.subs)) { state.subs = []; dirty = true; }
 
-    // Migrate default FM labels & v1 -> v2 ordering on upgrade to 1.0.1
     if (state.version !== APP_VERSION) {
       for (const fm of state.fmPresets) {
-        if (fm.id === 'default-fm-v1' && fm.name === 'Fragment v1 (Classic)') {
-          fm.name = 'Fragment v1';
-        }
-        if (fm.id === 'default-fm-v2' && fm.name === 'Fragment v2 (Default)') {
-          fm.name = 'Fragment v2';
-        }
+        if (fm.id === 'default-fm-v1' && fm.name === 'Fragment v1 (Classic)') fm.name = 'Fragment v1';
+        if (fm.id === 'default-fm-v2' && fm.name === 'Fragment v2 (Default)') fm.name = 'Fragment v2';
       }
       const idxV1 = state.fmPresets.findIndex((x) => x.id === 'default-fm-v1');
       const idxV2 = state.fmPresets.findIndex((x) => x.id === 'default-fm-v2');
@@ -171,6 +174,14 @@ function resolveSubIpGenMode(sub) {
   if (sub.useV4 === true && sub.useV6 === false) return 'v4';
   if (sub.useV4 === false && sub.useV6 === true) return 'v6';
   return 'mixed';
+}
+
+function resolveSubTransports(sub) {
+  if (Array.isArray(sub.transports) && sub.transports.length > 0) {
+    const filtered = sub.transports.filter((t) => ALL_TRANSPORT_IDS.includes(t));
+    if (filtered.length > 0) return filtered;
+  }
+  return ALL_TRANSPORT_IDS.slice();
 }
 
 async function sha256Hex(str) {
@@ -282,6 +293,7 @@ async function handleAdminApi(request, pathname, env, state) {
       ipPresets: state.ipPresets,
       subs: state.subs,
       fpOptions: FP_OPTIONS,
+      transportOptions: TRANSPORT_OPTIONS,
     });
   }
 
@@ -300,8 +312,14 @@ async function handleAdminApi(request, pathname, env, state) {
     const fmId = String(body.fmId || '');
     const ipListId = String(body.ipListId || '');
     const ipGenMode = VALID_IP_GEN_MODES.includes(body.ipGenMode) ? body.ipGenMode : '';
+    const transports = Array.isArray(body.transports)
+      ? body.transports.filter((t) => ALL_TRANSPORT_IDS.includes(t))
+      : [];
     const base64 = Boolean(body.base64);
 
+    if (!transports.length) {
+      return jsonResponse({ error: 'Please select at least one Transport type' }, 400);
+    }
     if (!ipGenMode) {
       return jsonResponse({ error: 'Please select an Output IP Version mode' }, 400);
     }
@@ -326,20 +344,32 @@ async function handleAdminApi(request, pathname, env, state) {
       }
     }
 
+    const subObj = {
+      id: editingId ? (customSlug || editingId) : (customSlug || randomId(10)),
+      name,
+      inputUrl,
+      csId,
+      fmId,
+      ipListId,
+      ipGenMode,
+      transports,
+      fp,
+      base64,
+      updatedAt: Date.now(),
+    };
+
     if (editingId) {
       const idx = state.subs.findIndex((s) => s.id === editingId);
       if (idx === -1) return jsonResponse({ error: 'Subscription not found' }, 404);
-      const newId = customSlug || editingId;
-      if (newId !== editingId && state.subs.some((s) => s.id === newId)) {
+      if (subObj.id !== editingId && state.subs.some((s) => s.id === subObj.id)) {
         return jsonResponse({ error: 'This custom ID is already in use' }, 400);
       }
-      state.subs[idx] = { id: newId, name, inputUrl, csId, fmId, ipListId, ipGenMode, fp, base64, updatedAt: Date.now() };
+      state.subs[idx] = subObj;
     } else {
-      const newId = customSlug || randomId(10);
-      if (state.subs.some((s) => s.id === newId)) {
+      if (state.subs.some((s) => s.id === subObj.id)) {
         return jsonResponse({ error: 'This custom ID is already in use' }, 400);
       }
-      state.subs.unshift({ id: newId, name, inputUrl, csId, fmId, ipListId, ipGenMode, fp, base64, updatedAt: Date.now() });
+      state.subs.unshift(subObj);
     }
     await saveState(env, state);
     return jsonResponse({ ok: true, subs: state.subs });
@@ -552,6 +582,7 @@ async function convertSubscription(sub, state) {
   const ipPreset = state.ipPresets.find((x) => x.id === sub.ipListId);
 
   const ipGenMode = resolveSubIpGenMode(sub);
+  const allowedTransports = resolveSubTransports(sub);
   const csValue = csPreset ? csPreset.value.trim() : '';
   const fmValue = fmPreset ? fmPreset.value.trim() : '';
   const fpValue = sub.fp || 'unsafe';
@@ -580,7 +611,7 @@ async function convertSubscription(sub, state) {
   const detectedFormats = new Set();
   const upstreamHeaders = {};
   let skippedNonTls = 0;
-  let skippedNonWs = 0;
+  let skippedTransport = 0;
   let skippedIpVersion = 0;
   let skippedUnsupported = 0;
 
@@ -627,15 +658,14 @@ async function convertSubscription(sub, state) {
   const pickRandom = (arr) => arr[Math.floor(Math.random() * arr.length)];
   const uriOpts = { fp: fpValue, cs: csValue, fm: fmValue };
 
-  // Strict Filter: ONLY security === 'tls' AND netType === 'ws'
   const links = [];
   for (const node of allNodes) {
     if (node.security !== 'tls') {
       skippedNonTls++;
       continue;
     }
-    if (node.netType !== 'ws') {
-      skippedNonWs++;
+    if (!allowedTransports.includes(node.netType)) {
+      skippedTransport++;
       continue;
     }
 
@@ -685,11 +715,19 @@ async function convertSubscription(sub, state) {
     totalFound: allNodes.length,
     convertedCount: links.length,
     skippedNonTls,
-    skippedNonWs,
+    skippedTransport,
     skippedIpVersion,
     skippedUnsupported,
     upstreamHeaders,
   };
+}
+
+function normalizeTransportName(raw) {
+  const t = String(raw || 'tcp').toLowerCase().trim();
+  if (t === 'websocket') return 'ws';
+  if (t === 'splithttp') return 'xhttp';
+  if (t === 'raw') return 'tcp';
+  return t;
 }
 
 function parseSubscriptionPayload(rawText) {
@@ -805,12 +843,43 @@ function xrayOutboundToNodes(ob) {
     ? tlsSettings.alpn.join(',')
     : (typeof tlsSettings.alpn === 'string' ? tlsSettings.alpn : '');
 
-  let netType = String(stream.network || 'tcp').toLowerCase();
-  if (netType === 'websocket') netType = 'ws';
+  const netType = normalizeTransportName(stream.network || 'tcp');
 
-  const wsSettings = stream.wsSettings || {};
-  const host = extractHeaderHost(wsSettings.headers) || wsSettings.host || '';
-  const path = wsSettings.path || '';
+  let host = '';
+  let path = '';
+  let serviceName = '';
+  let mode = '';
+  let authority = '';
+  let headerType = '';
+
+  if (netType === 'ws') {
+    const ws = stream.wsSettings || {};
+    host = extractHeaderHost(ws.headers) || ws.host || '';
+    path = ws.path || '';
+    headerType = 'none';
+  } else if (netType === 'httpupgrade') {
+    const hu = stream.httpupgradeSettings || {};
+    host = hu.host || extractHeaderHost(hu.headers) || '';
+    path = hu.path || '';
+  } else if (netType === 'xhttp') {
+    const xh = stream.xhttpSettings || stream.splithttpSettings || {};
+    host = xh.host || extractHeaderHost(xh.headers) || '';
+    path = xh.path || '';
+    mode = xh.mode || '';
+  } else if (netType === 'grpc') {
+    const gr = stream.grpcSettings || {};
+    serviceName = gr.serviceName || '';
+    mode = gr.multiMode ? 'multi' : '';
+    authority = gr.authority || '';
+  } else if (netType === 'tcp') {
+    const tc = stream.tcpSettings || stream.rawSettings || {};
+    const hdr = tc.header || {};
+    headerType = hdr.type || 'none';
+    if (headerType === 'http' && hdr.request) {
+      host = extractHeaderHost(hdr.request.headers);
+      path = Array.isArray(hdr.request.path) ? hdr.request.path.join(',') : (hdr.request.path || '');
+    }
+  }
 
   if (proto === 'trojan' && Array.isArray(settings.servers)) {
     for (const srv of settings.servers) {
@@ -825,9 +894,12 @@ function xrayOutboundToNodes(ob) {
         netType,
         host,
         path,
+        serviceName,
+        mode,
+        authority,
         sni,
         alpn,
-        headerType: 'none',
+        headerType,
         flow: '',
       });
     }
@@ -846,9 +918,12 @@ function xrayOutboundToNodes(ob) {
           netType,
           host,
           path,
+          serviceName,
+          mode,
+          authority,
           sni,
           alpn,
-          headerType: 'none',
+          headerType,
           flow: proto === 'vless' ? (user.flow || '') : '',
         });
       }
@@ -877,16 +952,29 @@ function singboxOutboundToNode(ob) {
   const alpn = Array.isArray(tls.alpn) ? tls.alpn.join(',') : (typeof tls.alpn === 'string' ? tls.alpn : '');
 
   const tr = ob.transport || {};
-  let netType = String(tr.type || 'tcp').toLowerCase();
-  if (netType === 'websocket') netType = 'ws';
+  const netType = normalizeTransportName(tr.type || 'tcp');
 
   let host = '';
   let path = '';
+  let serviceName = '';
+  let mode = '';
+  let authority = '';
   let headerType = '';
 
   if (netType === 'ws') {
     host = extractHeaderHost(tr.headers) || (Array.isArray(tr.host) ? tr.host.join(',') : tr.host || '');
     path = tr.path || '';
+    headerType = 'none';
+  } else if (netType === 'httpupgrade') {
+    host = (Array.isArray(tr.host) ? tr.host.join(',') : tr.host || '') || extractHeaderHost(tr.headers);
+    path = tr.path || '';
+  } else if (netType === 'xhttp') {
+    host = (Array.isArray(tr.host) ? tr.host.join(',') : tr.host || '') || extractHeaderHost(tr.headers);
+    path = tr.path || '';
+    mode = tr.mode || '';
+  } else if (netType === 'grpc') {
+    serviceName = tr.service_name || '';
+  } else if (netType === 'tcp') {
     headerType = 'none';
   }
 
@@ -900,6 +988,9 @@ function singboxOutboundToNode(ob) {
     netType,
     host,
     path,
+    serviceName,
+    mode,
+    authority,
     sni,
     alpn,
     headerType,
@@ -926,8 +1017,7 @@ function parseProxyUriToNode(uri) {
       if (!decoded) return null;
       const obj = JSON.parse(decoded);
       const security = (obj.tls === 'tls' || obj.tls === true) ? 'tls' : '';
-      let netType = String(obj.net || 'tcp').toLowerCase();
-      if (netType === 'websocket') netType = 'ws';
+      const netType = normalizeTransportName(obj.net || 'tcp');
 
       return {
         proto: 'vmess',
@@ -937,11 +1027,14 @@ function parseProxyUriToNode(uri) {
         tag: String(obj.ps || `${obj.add}:${obj.port}`),
         security,
         netType,
-        host: obj.host || '',
-        path: obj.path || '',
+        host: netType === 'grpc' ? '' : (obj.host || ''),
+        path: netType === 'grpc' ? '' : (obj.path || ''),
+        serviceName: netType === 'grpc' ? (obj.path || obj.serviceName || '') : '',
+        mode: netType === 'grpc' ? (obj.type || '') : '',
+        authority: '',
         sni: obj.sni || obj.host || '',
         alpn: obj.alpn || '',
-        headerType: obj.type || 'none',
+        headerType: (netType === 'ws' || netType === 'tcp') ? (obj.type || 'none') : '',
         flow: '',
       };
     }
@@ -961,8 +1054,7 @@ function parseProxyUriToNode(uri) {
     let security = (q.get('security') || '').toLowerCase();
     if (!security && proto === 'trojan') security = 'tls';
 
-    let netType = (q.get('type') || 'tcp').toLowerCase();
-    if (netType === 'websocket') netType = 'ws';
+    const netType = normalizeTransportName(q.get('type') || 'tcp');
 
     return {
       proto,
@@ -974,9 +1066,12 @@ function parseProxyUriToNode(uri) {
       netType,
       host: q.get('host') || '',
       path: q.get('path') || '',
+      serviceName: q.get('serviceName') || '',
+      mode: q.get('mode') || '',
+      authority: q.get('authority') || '',
       sni: q.get('sni') || '',
       alpn: q.get('alpn') || '',
-      headerType: q.get('headerType') || 'none',
+      headerType: q.get('headerType') || ((netType === 'ws' || netType === 'tcp') ? 'none' : ''),
       flow: proto === 'vless' ? (q.get('flow') || '') : '',
     };
   } catch {
@@ -996,11 +1091,25 @@ function buildCleanXrayUri(node, opts) {
   };
 
   addParam('security', 'tls');
-  addParam('type', 'ws');
+  addParam('type', node.netType);
   if (node.proto === 'vless' && node.flow) addParam('flow', node.flow);
 
-  addParam('host', node.host);
-  addParam('path', node.path);
+  if (node.netType === 'ws' || node.netType === 'httpupgrade') {
+    addParam('host', node.host);
+    addParam('path', node.path);
+  } else if (node.netType === 'xhttp') {
+    addParam('host', node.host);
+    addParam('path', node.path);
+    addParam('mode', node.mode);
+  } else if (node.netType === 'grpc') {
+    addParam('serviceName', node.serviceName);
+    addParam('mode', node.mode);
+    addParam('authority', node.authority);
+  } else if (node.netType === 'tcp' && node.headerType === 'http') {
+    addParam('host', node.host);
+    addParam('path', node.path);
+  }
+
   addParam('sni', node.sni);
   addParam('alpn', node.alpn);
   addParam('fp', opts.fp);
@@ -1008,7 +1117,9 @@ function buildCleanXrayUri(node, opts) {
   if (opts.cs) addParam('cs', opts.cs);
   if (opts.fm) addParam('fm', opts.fm);
 
-  addParam('headerType', node.headerType || 'none');
+  if (node.netType === 'ws' || node.netType === 'tcp') {
+    addParam('headerType', node.headerType || 'none');
+  }
 
   const tagEncoded = encodeURIComponent(node.tag);
   return `${node.proto}://${credEncoded}@${hostFormatted}:${node.port}?${params.join('&')}#${tagEncoded}`;
@@ -1220,6 +1331,7 @@ function renderDashboardPage(state, origin) {
     ipPresets: state.ipPresets,
     subs: state.subs,
     fpOptions: FP_OPTIONS,
+    transportOptions: TRANSPORT_OPTIONS,
   });
 
   return `<!doctype html>
@@ -1277,6 +1389,7 @@ function renderDashboardPage(state, origin) {
     }
     .card h2 { margin: 0 0 16px; font-size: 16px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; }
     .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
     label { display: block; font-size: 12px; color: #cbd5e1; margin-bottom: 6px; font-weight: 500; }
     input, select, textarea {
       width: 100%; padding: 10px 12px; border-radius: 10px;
@@ -1310,6 +1423,7 @@ function renderDashboardPage(state, origin) {
     }
     .badge-cyan { background: rgba(6, 182, 212, 0.16); color: #67e8f9; border-color: rgba(6, 182, 212, 0.3); }
     .badge-green { background: rgba(16, 185, 129, 0.16); color: #6ee7b7; border-color: rgba(16, 185, 129, 0.3); }
+    .badge-amber { background: rgba(245, 158, 11, 0.16); color: #fcd34d; border-color: rgba(245, 158, 11, 0.3); }
     .sub-link-box {
       margin-top: 8px; padding: 7px 10px; border-radius: 8px; background: rgba(2, 6, 23, 0.6);
       border: 1px dashed rgba(148, 163, 184, 0.25); font-size: 12px; color: #38bdf8;
@@ -1318,7 +1432,7 @@ function renderDashboardPage(state, origin) {
     }
     .actions { display: flex; flex-wrap: wrap; gap: 8px; }
     .switch-row { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
-    .switch-row input { width: auto; }
+    .switch-row input { width: auto; accent-color: var(--primary); cursor: pointer; }
     .check-group {
       display: flex; flex-wrap: wrap; align-items: center; gap: 12px; padding: 8px 12px;
       border-radius: 10px; border: 1px solid rgba(148, 163, 184, 0.22);
@@ -1354,7 +1468,7 @@ function renderDashboardPage(state, origin) {
       <div class="brand-icon">⚡</div>
       <div>
         <h1>Xray Subscription Converter <span class="ver-badge">v${APP_VERSION}</span></h1>
-        <small>Auto-detects Sing-box, Xray JSON &amp; V2Ray (Base64 / Raw) &rarr; TLS + WS with cs, fm, fp &amp; Clean IPs</small>
+        <small>Auto-detects Sing-box, Xray JSON &amp; V2Ray (Base64 / Raw) &rarr; TLS (WS / HTTPUpgrade / XHTTP / gRPC / TCP) with cs, fm, fp</small>
       </div>
     </div>
     <div class="header-actions">
@@ -1411,6 +1525,12 @@ function renderDashboardPage(state, origin) {
             <label>Server IP Mode (Clean IP List)</label>
             <select id="subIpList"></select>
           </div>
+        </div>
+        <div class="grid-2" style="margin-top:14px">
+          <div>
+            <label>Allowed Transports (TLS required)</label>
+            <div class="check-group" id="subTransportsGroup"></div>
+          </div>
           <div>
             <label>Output IP Version</label>
             <div class="check-group">
@@ -1425,7 +1545,7 @@ function renderDashboardPage(state, origin) {
           <input type="checkbox" id="subBase64" />
           <label for="subBase64" style="margin:0;cursor:pointer">Encode output as Base64</label>
         </div>
-        <div class="hint">⚠️ Filter: Only <code>security=tls</code> &amp; <code>type=ws</code> configs are kept. Check <b>IPv4</b> only, <b>IPv6</b> only, <b>both IPv4 &amp; IPv6</b> (generates 2 configs per server: 1 v4 + 1 v6), or <b>IPv4/IPv6</b> (picks 1 random IP from the combined list per server).</div>
+        <div class="hint">⚠️ Only <code>security=tls</code> configs matching your selected transports are converted. Check <b>IPv4</b> only, <b>IPv6</b> only, <b>both IPv4 &amp; IPv6</b> (2x per server), or <b>IPv4/IPv6</b> (1 random IP from combined list).</div>
         <div style="margin-top:16px;display:flex;gap:10px">
           <button type="submit" class="btn btn-primary">Save Subscription</button>
           <button type="button" id="cancelSubEdit" class="btn btn-secondary hidden">Cancel Edit</button>
@@ -1653,6 +1773,23 @@ function renderDashboardPage(state, origin) {
     return 'mixed';
   }
 
+  function getSelectedTransports() {
+    var arr = [];
+    document.querySelectorAll('#subTransportsGroup input[type="checkbox"]:checked').forEach(function(cb) {
+      arr.push(cb.value);
+    });
+    return arr;
+  }
+
+  function setSelectedTransports(list) {
+    var active = Array.isArray(list) && list.length
+      ? list
+      : state.transportOptions.map(function(t) { return t.id; });
+    document.querySelectorAll('#subTransportsGroup input[type="checkbox"]').forEach(function(cb) {
+      cb.checked = active.indexOf(cb.value) !== -1;
+    });
+  }
+
   // Tabs
   document.querySelectorAll('.tab-btn').forEach(function(btn) {
     btn.addEventListener('click', function() {
@@ -1689,6 +1826,13 @@ function renderDashboardPage(state, origin) {
         return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + p.ips.length + ' IPs)</option>';
       }).join('');
 
+    var trGroup = document.getElementById('subTransportsGroup');
+    if (!trGroup.children.length) {
+      trGroup.innerHTML = state.transportOptions.map(function(t) {
+        return '<label class="check-item"><input type="checkbox" value="' + escapeHtml(t.id) + '" checked /> ' + escapeHtml(t.label) + '</label>';
+      }).join('');
+    }
+
     document.getElementById('setAdminPath').value = state.adminPath;
   }
 
@@ -1711,11 +1855,21 @@ function renderDashboardPage(state, origin) {
       var ipObj = state.ipPresets.find(function(x) { return x.id === s.ipListId; });
       var mode = resolveClientIpGenMode(s);
       var verText = modeBadges[mode] || 'IPv4/IPv6 (Random)';
+      var trList = Array.isArray(s.transports) && s.transports.length
+        ? s.transports
+        : state.transportOptions.map(function(t) { return t.id; });
+      var trText = trList.length === state.transportOptions.length
+        ? 'All Transports'
+        : trList.map(function(id) {
+            var found = state.transportOptions.find(function(t) { return t.id === id; });
+            return found ? found.label : id;
+          }).join(', ');
       var sid = escapeHtml(s.id);
       return '<div class="item">' +
         '<div class="item-meta">' +
           '<div class="item-title">' + escapeHtml(s.name) +
             '<span class="badge">fp: ' + escapeHtml(s.fp || 'unsafe') + '</span>' +
+            '<span class="badge badge-amber">' + escapeHtml(trText) + '</span>' +
             (csObj ? '<span class="badge badge-cyan">cs: ' + escapeHtml(csObj.name) + '</span>' : '') +
             (fmObj ? '<span class="badge badge-cyan">fm: ' + escapeHtml(fmObj.name) + '</span>' : '') +
             (ipObj
@@ -1869,6 +2023,11 @@ function renderDashboardPage(state, origin) {
   // Sub Form
   document.getElementById('subForm').addEventListener('submit', async function(e) {
     e.preventDefault();
+    var transports = getSelectedTransports();
+    if (!transports.length) {
+      showToast('Please select at least one Transport type', true);
+      return;
+    }
     var ipGenMode = getIpGenModeFromCheckboxes();
     if (!ipGenMode) {
       showToast('Please select an Output IP Version option', true);
@@ -1883,6 +2042,7 @@ function renderDashboardPage(state, origin) {
       fmId: document.getElementById('subFm').value,
       ipListId: document.getElementById('subIpList').value,
       ipGenMode: ipGenMode,
+      transports: transports,
       fp: document.getElementById('subFp').value,
       base64: document.getElementById('subBase64').checked
     };
@@ -1907,6 +2067,7 @@ function renderDashboardPage(state, origin) {
     document.getElementById('subCs').value = s.csId || '';
     document.getElementById('subFm').value = s.fmId || '';
     document.getElementById('subIpList').value = s.ipListId || '';
+    setSelectedTransports(s.transports);
     setIpGenModeCheckboxes(resolveClientIpGenMode(s));
     document.getElementById('subFp').value = s.fp || 'unsafe';
     document.getElementById('subBase64').checked = Boolean(s.base64);
@@ -1918,6 +2079,7 @@ function renderDashboardPage(state, origin) {
   function resetSubForm() {
     document.getElementById('subForm').reset();
     document.getElementById('subEditingId').value = '';
+    setSelectedTransports(null);
     setIpGenModeCheckboxes('mixed');
     document.getElementById('subFormTitle').textContent = 'Add New Subscription';
     document.getElementById('cancelSubEdit').classList.add('hidden');
@@ -1943,7 +2105,7 @@ function renderDashboardPage(state, origin) {
       ' | Input Nodes: ' + data.totalFound +
       ' | Generated Output: ' + data.convertedCount +
       ' | Skipped (non-TLS): ' + data.skippedNonTls +
-      ' | Skipped (non-WS): ' + data.skippedNonWs +
+      ' | Skipped (transport): ' + data.skippedTransport +
       (data.skippedIpVersion ? ' | Skipped (IP v4/v6): ' + data.skippedIpVersion : '');
     document.getElementById('previewText').value = data.links.join('\\n');
     document.getElementById('previewModal').classList.remove('hidden');
