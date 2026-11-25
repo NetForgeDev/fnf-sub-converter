@@ -1,8 +1,12 @@
 /**
- * Cloudflare Worker: Universal (Sing-box / Xray JSON / V2Ray Base64 & Raw) -> Clean Xray (TLS + WS + cs/fm/fp + IPv4/IPv6 Modes)
+ * Cloudflare Worker: F&F Xray Subscription Converter
+ * Repository: https://github.com/NetForgeDev/fnf-sub-converter
  * KV Binding required: SUB_KV
  * Optional Env Vars (initial fallback): ADMIN_PATH (default: "panel"), ADMIN_PASS (default: "admin123")
  */
+
+const APP_VERSION = '1.0.1';
+const GITHUB_URL = 'https://github.com/NetForgeDev/fnf-sub-converter';
 
 const DEFAULT_CS_LIST = [
   {
@@ -15,16 +19,16 @@ const DEFAULT_CS_LIST = [
 
 const DEFAULT_FM_LIST = [
   {
-    id: 'default-fm-v2',
-    name: 'Fragment v2',
-    value:
-      '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}}]}',
-  },
-  {
     id: 'default-fm-v1',
     name: 'Fragment v1',
     value:
       '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["5", "94", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["109", "1"], "delays": ["1"], "maxSplit": "355"}}]}',
+  },
+  {
+    id: 'default-fm-v2',
+    name: 'Fragment v2',
+    value:
+      '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}}]}',
   },
 ];
 
@@ -104,6 +108,7 @@ async function loadState(env) {
     const initPath = normalizePath(env.ADMIN_PATH || 'panel');
     const initPass = env.ADMIN_PASS || 'admin123';
     state = {
+      version: APP_VERSION,
       adminPath: initPath,
       passwordHash: await sha256Hex(initPass),
       sessionSecret: randomId(32),
@@ -114,10 +119,36 @@ async function loadState(env) {
     };
     await env.SUB_KV.put(KV_KEY, JSON.stringify(state));
   } else {
-    if (!Array.isArray(state.csPresets)) state.csPresets = DEFAULT_CS_LIST;
-    if (!Array.isArray(state.fmPresets)) state.fmPresets = DEFAULT_FM_LIST;
-    if (!Array.isArray(state.ipPresets)) state.ipPresets = [];
-    if (!Array.isArray(state.subs)) state.subs = [];
+    let dirty = false;
+    if (!Array.isArray(state.csPresets)) { state.csPresets = DEFAULT_CS_LIST; dirty = true; }
+    if (!Array.isArray(state.fmPresets)) { state.fmPresets = DEFAULT_FM_LIST; dirty = true; }
+    if (!Array.isArray(state.ipPresets)) { state.ipPresets = []; dirty = true; }
+    if (!Array.isArray(state.subs)) { state.subs = []; dirty = true; }
+
+    // Migrate default FM labels & v1 -> v2 ordering on upgrade to 1.0.1
+    if (state.version !== APP_VERSION) {
+      for (const fm of state.fmPresets) {
+        if (fm.id === 'default-fm-v1' && fm.name === 'Fragment v1 (Classic)') {
+          fm.name = 'Fragment v1';
+        }
+        if (fm.id === 'default-fm-v2' && fm.name === 'Fragment v2 (Default)') {
+          fm.name = 'Fragment v2';
+        }
+      }
+      const idxV1 = state.fmPresets.findIndex((x) => x.id === 'default-fm-v1');
+      const idxV2 = state.fmPresets.findIndex((x) => x.id === 'default-fm-v2');
+      if (idxV1 !== -1 && idxV2 !== -1 && idxV2 < idxV1) {
+        const tmp = state.fmPresets[idxV1];
+        state.fmPresets[idxV1] = state.fmPresets[idxV2];
+        state.fmPresets[idxV2] = tmp;
+      }
+      state.version = APP_VERSION;
+      dirty = true;
+    }
+
+    if (dirty) {
+      await env.SUB_KV.put(KV_KEY, JSON.stringify(state));
+    }
   }
   return state;
 }
@@ -244,6 +275,7 @@ async function handleAdminApi(request, pathname, env, state) {
 
   if (pathname === '/api/data' && method === 'GET') {
     return jsonResponse({
+      version: APP_VERSION,
       adminPath: state.adminPath,
       csPresets: state.csPresets,
       fmPresets: state.fmPresets,
@@ -620,12 +652,10 @@ async function convertSubscription(sub, state) {
         if (builtV4) links.push(builtV4);
         if (builtV6) links.push(builtV6);
       } else {
-        // 'mixed' (IPv4/IPv6 combined random)
         const built = buildCleanXrayUri({ ...node, server: pickRandom(allPool) }, uriOpts);
         if (built) links.push(built);
       }
     } else {
-      // Original Server IP mode
       if (ipGenMode === 'v4' && isIPv6(node.server)) {
         skippedIpVersion++;
         continue;
@@ -680,7 +710,6 @@ function parseSubscriptionPayload(rawText) {
     text = decoded.replace(/^\uFEFF/, '').trim();
   }
 
-  // Case 1: JSON (Sing-box JSON vs Xray JSON)
   if (text.startsWith('{') || text.startsWith('[')) {
     try {
       const json = JSON.parse(text);
@@ -737,7 +766,6 @@ function parseSubscriptionPayload(rawText) {
     }
   }
 
-  // Case 2: V2Ray / Xray URI lines
   let foundUriLines = false;
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
@@ -1069,6 +1097,8 @@ function jsonResponse(data, status = 200) {
    UI HTML Templates (English)
    =========================== */
 
+const GITHUB_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0 0 24 12c0-6.63-5.37-12-12-12z"/></svg>`;
+
 function renderKvSetupPage() {
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -1092,7 +1122,7 @@ function renderLoginPage(adminRoute) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Admin Login - Sub Converter</title>
+  <title>Admin Login - Sub Converter v${APP_VERSION}</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     * { box-sizing: border-box; }
@@ -1106,7 +1136,7 @@ function renderLoginPage(adminRoute) {
       width: 100%; max-width: 400px;
       background: rgba(17, 24, 39, 0.78); backdrop-filter: blur(16px);
       border: 1px solid rgba(148, 163, 184, 0.16); border-radius: 20px;
-      padding: 32px 28px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
+      padding: 32px 28px 24px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6);
     }
     .logo {
       width: 52px; height: 52px; border-radius: 14px; margin: 0 auto 16px;
@@ -1130,6 +1160,15 @@ function renderLoginPage(adminRoute) {
     }
     button:hover { opacity: 0.92; }
     .err { color: #f87171; font-size: 13px; margin-top: 12px; text-align: center; min-height: 20px; }
+    .login-footer {
+      margin-top: 14px; padding-top: 14px; border-top: 1px solid rgba(148, 163, 184, 0.14);
+      display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: #94a3b8;
+    }
+    .gh-link {
+      display: inline-flex; align-items: center; gap: 6px; color: #cbd5e1; text-decoration: none;
+      transition: color 0.2s;
+    }
+    .gh-link:hover { color: #fff; }
   </style>
 </head>
 <body>
@@ -1143,6 +1182,10 @@ function renderLoginPage(adminRoute) {
       <button type="submit">Sign In</button>
       <div class="err" id="err"></div>
     </form>
+    <div class="login-footer">
+      <span>v${APP_VERSION}</span>
+      <a class="gh-link" href="${GITHUB_URL}" target="_blank" rel="noopener noreferrer">${GITHUB_SVG}<span>GitHub</span></a>
+    </div>
   </div>
   <script>
     document.getElementById('loginForm').addEventListener('submit', async function(e) {
@@ -1169,6 +1212,7 @@ function renderLoginPage(adminRoute) {
 
 function renderDashboardPage(state, origin) {
   const initialJson = JSON.stringify({
+    version: APP_VERSION,
     origin,
     adminPath: state.adminPath,
     csPresets: state.csPresets,
@@ -1183,7 +1227,7 @@ function renderDashboardPage(state, origin) {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Xray Subscription Converter Panel</title>
+  <title>Xray Subscription Converter Panel v${APP_VERSION}</title>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
@@ -1208,8 +1252,14 @@ function renderDashboardPage(state, origin) {
       background: linear-gradient(135deg, var(--primary), var(--cyan));
       display: flex; align-items: center; justify-content: center; font-size: 20px;
     }
-    .brand h1 { margin: 0; font-size: 18px; }
+    .brand h1 { margin: 0; font-size: 18px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .ver-badge {
+      font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+      background: rgba(99, 102, 241, 0.2); color: #a5b4fc; border: 1px solid rgba(99, 102, 241, 0.35);
+    }
     .brand small { color: var(--muted); font-size: 12px; }
+    .header-actions { display: flex; align-items: center; gap: 8px; }
+    .gh-btn { text-decoration: none; }
     .tabs { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
     .tab-btn {
       background: rgba(15, 23, 42, 0.7); border: 1px solid var(--border); color: var(--muted);
@@ -1303,11 +1353,17 @@ function renderDashboardPage(state, origin) {
     <div class="brand">
       <div class="brand-icon">⚡</div>
       <div>
-        <h1>Xray Subscription Converter</h1>
+        <h1>Xray Subscription Converter <span class="ver-badge">v${APP_VERSION}</span></h1>
         <small>Auto-detects Sing-box, Xray JSON &amp; V2Ray (Base64 / Raw) &rarr; TLS + WS with cs, fm, fp &amp; Clean IPs</small>
       </div>
     </div>
-    <button type="button" id="logoutBtn" class="btn btn-secondary btn-sm">Logout</button>
+    <div class="header-actions">
+      <a href="${GITHUB_URL}" target="_blank" rel="noopener noreferrer" class="btn btn-secondary btn-sm gh-btn" title="GitHub Repository">
+        ${GITHUB_SVG}
+        <span>GitHub</span>
+      </a>
+      <button type="button" id="logoutBtn" class="btn btn-secondary btn-sm">Logout</button>
+    </div>
   </header>
 
   <div class="tabs">
@@ -1442,15 +1498,15 @@ function renderDashboardPage(state, origin) {
       <h2>
         <span id="fmFormTitle">Add / Edit Final Mask (fm)</span>
         <span style="display:flex;gap:8px">
-          <button type="button" id="loadFmV2Btn" class="btn btn-secondary btn-sm">Load v2</button>
           <button type="button" id="loadFmV1Btn" class="btn btn-secondary btn-sm">Load v1</button>
+          <button type="button" id="loadFmV2Btn" class="btn btn-secondary btn-sm">Load v2</button>
         </span>
       </h2>
       <form id="fmForm">
         <input type="hidden" id="fmEditId" />
         <div style="margin-bottom:12px">
           <label>Preset Name</label>
-          <input type="text" id="fmName" placeholder="e.g. Fragment v2" required />
+          <input type="text" id="fmName" placeholder="e.g. Fragment v1" required />
         </div>
         <div>
           <label>Final Mask JSON</label>
@@ -1628,7 +1684,7 @@ function renderDashboardPage(state, origin) {
       }).join('');
 
     var ipSel = document.getElementById('subIpList');
-    ipSel.innerHTML = '<option value="">-- Use Original Server IP (Default) --</option>' +
+    ipSel.innerHTML = '<option value="">-- Use Original Server IP --</option>' +
       state.ipPresets.map(function(p) {
         return '<option value="' + escapeHtml(p.id) + '">' + escapeHtml(p.name) + ' (' + p.ips.length + ' IPs)</option>';
       }).join('');
@@ -1993,12 +2049,12 @@ function renderDashboardPage(state, origin) {
     }
   }
 
-  // FM Form & Templates
-  document.getElementById('loadFmV2Btn').addEventListener('click', function() {
-    document.getElementById('fmValue').value = '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}}]}';
-  });
+  // FM Form & Templates (v1 first, v2 second)
   document.getElementById('loadFmV1Btn').addEventListener('click', function() {
     document.getElementById('fmValue').value = '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["5", "94", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["109", "1"], "delays": ["1"], "maxSplit": "355"}}]}';
+  });
+  document.getElementById('loadFmV2Btn').addEventListener('click', function() {
+    document.getElementById('fmValue').value = '{"tcp": [{"type": "fragment", "settings": {"packets": "tlshello", "lengths": ["0", "104", "1"], "delays": ["0"], "maxSplit": "0"}},{"type": "fragment", "settings": {"packets": "1-1", "lengths": ["114", "1"], "delays": ["1"], "maxSplit": "11"}}]}';
   });
 
   document.getElementById('fmForm').addEventListener('submit', async function(e) {
